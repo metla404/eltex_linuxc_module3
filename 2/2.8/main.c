@@ -1,130 +1,130 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/fcntl.h>
-#include <sys/types.h>
-#include <errno.h>
 #include <unistd.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
+#include <sys/fcntl.h>
 #include <time.h>
+#include <sys/types.h>
 #include <signal.h>
-#include <string.h>
+#include <wait.h>
 
-#define FILE_NAME "numbers.txt"
+volatile sig_atomic_t flag = 0;
 
-void sigusr1_handler(int signum)
+void sig_handler(int signo)
 {
-    printf("[CHILD] [PID: %d] [PPID: %d] Получен сигнал SIGUSR1, доступ к файлу заблокирован\n", getpid(), getppid());
-}
-
-void sigusr2_handler(int signum)
-{
-    printf("[CHILD] [PID: %d] [PPID: %d] Получен сигнал SIGUSR2, доступ к файлу разрешен\n", getpid(), getppid());
-}
-
-int main(int argc, char *argv[]) 
-{
-    int fd;
-    FILE* f=fopen(FILE_NAME,"w");
-    int buffer[10];
-
-    int n, i;
-
-    int pipefd[2];
-    srand(time(0));
-
-    if (argc == 1)
+    if (signo == SIGUSR1)
     {
-        printf("Использование: %s <size>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        flag = 1;
+    } 
+    else if (signo == SIGUSR2)
+    {
+        flag = 0;
     }
+}
+
+int main(int argc, char *argv[])
+{
+    int fd[2];
+    pid_t pid;
+    int i, num;
 
     if (argc != 2)
     {
-        printf("Использование: %s <size>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        printf("Правило использования: ./main <кол-во_чисел>\n");
+        return 1;
     }
 
-    if (pipe(pipefd) == -1)
+    num = atoi(argv[1]);
+
+    if (pipe(fd) == -1)
     {
         perror("pipe");
         exit(EXIT_FAILURE);
     }
 
-    n = atoi(argv[1]);
-    pid_t pid = fork();
+    pid = fork();
 
     if (pid < 0)
     {
         perror("fork");
-        return 1;
+        exit(EXIT_FAILURE);
     }
-    if (pid > 0) // PARENT
+
+    if (pid > 0)
+    { // PARENT
+        close(fd[1]); // write end of pipe
+
+        FILE *file = fopen("output.txt", "w");
+        if (file == NULL)
+        {
+            printf("Ошибка открытия файла!\n");
+            return 1;
+        }
+
+        for (i = 0; i < num; i++)
+        {
+            int r;
+            read(fd[0], &r, sizeof(r));
+            printf("Полученное число: %d\n", r);
+            fprintf(file, "%d\n", r);
+            fflush(file);
+            kill(pid, SIGUSR1);
+            sleep(1);
+            kill(pid, SIGUSR2);
+        }
+
+        fclose(file);
+        close(fd[0]);
+        wait(NULL);
+    } 
+    else
+    { // CHILD
+        close(fd[0]); // read end of pipe
+
+        signal(SIGUSR1, sig_handler);
+        signal(SIGUSR2, sig_handler);
+
+        srand(time(NULL));
+        for (i = 0; i < num; i++) 
+        {
+            int random_num = rand() % 100;
+            write(fd[1], &random_num, sizeof(random_num));
+
+            while (flag) 
+            {
+                sleep(1);
+            }
+            sleep(1);
+
+            FILE *file = fopen("output.txt", "r");
+            if (file == NULL)
+            {
+                printf("Ошибка открытия файла!\n");
+                return 1;
+            }
+
+            int last_num;
+            for (int j = 0; j <= i; j++)
+            {
+                if (j == i)
+                {
+                    fscanf(file, "%d", &last_num);
+                }
+                else
+                {
+                    fscanf(file, "%*d");
+                }
+            }
+            printf("Дочерний читает числа: %d\n", last_num);
+            
+            fclose(file);
+        }
+        close(fd[1]);
+    }
+
+    if (pid > 0) 
     {
-        close(pipefd[1]);
-
-        int mas_receive[n];
-
-        for (i = 0; i < n; i++)
-        {
-            read(pipefd[0], mas_receive, n * sizeof(int));
-        }
-
-        printf("\n[PARENT] [PID: %d] [PPID: %d]\nПолучил числа:\n", getpid(), getppid());
-        for (i = 0; i < n; i++)
-        {
-            printf("%d ", mas_receive[i]);
-            fprintf(f, "%d ", mas_receive[i]);
-        }
-
-        fclose(f);
-
-        kill(pid, SIGUSR1);
-
-        sleep(5);
-
-        kill(pid, SIGUSR2);
-
         wait(NULL);
     }
-    if (pid == 0) // CHILD
-    {
-        int mas_send[n];
-        close(pipefd[0]);
 
-        for (i=0; i < n; i++)
-        {
-            mas_send[i] = rand() % 101;
-        }
-
-        write(pipefd[1], mas_send, n * sizeof(int));
-
-        printf("\n[CHILD] [PID: %d] [PPID: %d]\nCгенерировал и отправил числа:\n", getpid(), getppid());
-        for(i = 0; i < n; i++)
-        {
-            printf("%d ", mas_send[i]);
-        }
-        printf("\n");
-
-        struct sigaction sigusr1_action, sigusr2_action;
-        memset(&sigusr1_action, 0, sizeof(sigusr1_action));
-        memset(&sigusr2_action, 0, sizeof(sigusr2_action));
-        sigusr1_action.sa_handler = sigusr1_handler;
-        sigusr2_action.sa_handler = sigusr2_handler;
-        sigaction(SIGUSR1, &sigusr1_action, NULL);
-        sigaction(SIGUSR2, &sigusr2_action, NULL);
-
-        // Читаем файл
-        FILE* f=fopen(FILE_NAME,"r");
-        for (i = 0; i < n; i++)
-        {
-            fscanf(f, "%d", &mas_send[i]);
-            printf("[CHILD] [PID: %d] [PPID: %d] Прочитал число: %d\n", getpid(), getppid(), mas_send[i]);
-        }
-        fclose(f);
-
-        mas_send[0] = rand() % 101;
-        write(pipefd[1], mas_send, sizeof(int));
-    }
     return 0;
 }
